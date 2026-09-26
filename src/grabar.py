@@ -21,6 +21,7 @@ import numpy as np
 from rich.align import Align
 from rich.console import Console, Group
 from rich.live import Live
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn
 from rich.text import Text
@@ -107,6 +108,12 @@ def meter(level_db, width=40):
     return text
 
 
+def screen(body):
+    """Pantalla de la interfaz: título centrado y contenido, sin marco."""
+    return Padding(Align.center(Group(Text("Grabador de audio del sistema", style="bold"), Text(""), body)),
+                   (1, 2))
+
+
 def render(elapsed, level_db, values, history, silent_for, peak_db, n_bands, paused=False):
     blink = int(time.monotonic() * 2) % 2 == 0
     if paused:
@@ -126,9 +133,7 @@ def render(elapsed, level_db, values, history, silent_for, peak_db, n_bands, pau
         waterfall(history),
         Text(""), Text("Espacio / P: pausar o continuar    Ctrl+C: terminar y transcribir", style="grey50"),
     )
-    color = "cyan" if paused else ("yellow" if silent_for > 2.0 else "red")
-    return Panel(Align.center(body), title="[bold]Grabador de audio del sistema[/bold]",
-                 border_style=color, padding=(1, 2))
+    return screen(body)
 
 
 MODELS = [  # (nombre en faster-whisper, descarga aprox., descripcion)
@@ -224,8 +229,7 @@ def select_model(default="base"):
             body.append("✔ descargado\n" if downloaded[name] else "\n", style="green")
         body.append("\nLos modelos sin marcar se descargan al elegirlos.\n", style="grey50")
         body.append("↑/↓ o 1-5: elegir    Enter: continuar    Q / Ctrl+C: salir", style="grey62")
-        return Panel(Align.center(body), title="[bold]Grabador de audio del sistema[/bold]",
-                     border_style="green", padding=(1, 2))
+        return screen(body)
 
     try:
         tty.setcbreak(sys.stdin.fileno())
@@ -261,8 +265,7 @@ def wait_for_start(model_name):
     )
     try:
         tty.setcbreak(sys.stdin.fileno())
-        with Live(Panel(Align.center(body), title="[bold]Grabador de audio del sistema[/bold]",
-                        border_style="green", padding=(1, 2)), console=console, screen=True):
+        with Live(screen(body), console=console, screen=True):
             while True:
                 key = os.read(sys.stdin.fileno(), 32).decode(errors="ignore")
                 if any(k in key for k in ("\n", "\r", " ")):

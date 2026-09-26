@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Contexto para asistentes de IA que trabajen en esta carpeta (`~/Documentos/tools`).
+Contexto para asistentes de IA que trabajen en esta carpeta (`~/Documentos/whisper-tool`).
 
 ## Qué es este proyecto
 
@@ -21,12 +21,13 @@ El usuario habla español. Comentarios, mensajes de la interfaz y documentación
 
 | Archivo | Función |
 |---|---|
-| `whisper-tool` | Punto de entrada (nombre de la herramienta). Script bash que hace `cd` a su carpeta (resolviendo enlaces simbólicos), comprueba que exista `pw-record`, crea `.venv-whisper/` e instala `requirements.txt` si es la primera ejecución, y ejecuta `src/grabar.py`. Acepta el modelo como argumento; sin argumento, `grabar.py` muestra un menú. |
-| `requirements.txt`, `README.md`, `LICENSE`, `.gitignore` | Archivos para publicar el proyecto en git (el `.gitignore` excluye el venv, `__pycache__/`, `records/` y `.whisper-tool.json`). |
+| `whisper-tool` | Punto de entrada (nombre de la herramienta). Script bash que hace `cd` a su carpeta (resolviendo enlaces simbólicos), comprueba que exista `pw-record`, crea `.venv-whisper/` e instala `src/requirements.txt` si es la primera ejecución, y ejecuta `src/grabar.py`. Acepta el modelo como argumento; sin argumento, `grabar.py` muestra un menú. |
+| `src/requirements.txt`, `src/AGENTS.md` | Dependencias de Python (las instala `whisper-tool`) y este archivo de contexto; viven en `src/`. |
+| `README.md`, `LICENSE`, `.gitignore` | Archivos para publicar el proyecto en git, en la raíz (el `.gitignore` excluye el venv, `__pycache__/`, `records/` y `.whisper-tool.json`). |
 | `src/grabar.py` | Interfaz de terminal con `rich`: grabación, espectro, espectrograma, pausa y transcripción. |
 | `src/transcribe.py` | Transcribe un archivo de audio existente: `./.venv-whisper/bin/python src/transcribe.py audio.mp3 [modelo]`. Imprime el texto en la salida estándar. |
 | `records/` | Se crea al grabar. Se guarda en la raíz del proyecto (no dentro de `src/`). Guarda `grabacion_AAAAMMDD_HHMMSS.wav` y `.txt` con la transcripción. |
-| `.venv-whisper/` | Entorno virtual. No editar a mano; si se rompe, recrear con `python3 -m venv .venv-whisper` y `pip install faster-whisper rich`. |
+| `.venv-whisper/` | Entorno virtual. No editar a mano; si se rompe, recrear con `python3 -m venv .venv-whisper` y `pip install -r src/requirements.txt`. |
 
 ## Cómo funciona `src/grabar.py`
 

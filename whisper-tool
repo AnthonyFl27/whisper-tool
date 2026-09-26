@@ -23,7 +23,7 @@ fi
 if ! "$VENV/bin/python" -c "import faster_whisper, numpy, rich" 2>/dev/null; then
     echo "Instalando dependencias (solo la primera vez)..."
     "$VENV/bin/pip" install --quiet --upgrade pip
-    "$VENV/bin/pip" install -r requirements.txt
+    "$VENV/bin/pip" install -r src/requirements.txt
 fi
 
 exec "$VENV/bin/python" src/grabar.py "$@"
