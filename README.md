@@ -5,6 +5,8 @@ Herramienta de terminal que **graba el audio que suena en tu equipo** (bocinas o
 Sirve para transcribir audios que no se pueden descargar como archivo (por ejemplo, reproductores incrustados en
 páginas web). Todo corre en local: el audio no sale de tu equipo.
 
+![whisper-tool grabando: medidor de nivel, espectro y espectrograma en vivo](tool.png)
+
 ## Requisitos
 
 - Linux con **PipeWire** (usa `pw-record`).
