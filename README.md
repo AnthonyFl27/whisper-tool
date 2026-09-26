@@ -17,8 +17,7 @@ No hace falta instalar ffmpeg ni tener GPU.
 ## Uso
 
 ```bash
-./whisper-tool            # primera vez: menú para elegir modelo; después va directo a grabar con el último usado
-./whisper-tool small      # usa directamente un modelo
+./whisper-tool
 ```
 
 La primera ejecución crea el entorno virtual (`.venv-whisper/`) e instala las dependencias automáticamente.
@@ -61,11 +60,3 @@ Las grabaciones y transcripciones se guardan en `records/` como `grabacion_AAAAM
 - Se captura **todo** el sonido del equipo: silencia notificaciones y música.
 - Con audio vacío, Whisper puede inventar texto; el panel avisa cuando no hay señal.
 
-## Uso responsable
-
-Úsala solo cuando las reglas de la actividad lo permitan. Si es una tarea o un examen, revisa antes que se
-pueda usar IA o herramientas de transcripción.
-
-## Licencia
-
-MIT. Whisper, faster-whisper y las demás dependencias tienen sus propias licencias (permisivas).
