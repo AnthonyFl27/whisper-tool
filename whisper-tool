@@ -18,7 +18,7 @@ fi
 if [ ! -x "$VENV/bin/python" ]; then
     command -v python3 >/dev/null || { echo "Error: falta python3." >&2; exit 1; }
     echo "Primera ejecución: creando entorno virtual..."
-    python3 -m venv "$VENV" || { echo "Error: no se pudo crear el venv (en Debian/Ubuntu: sudo apt install python3-venv)." >&2; rm -rf "$VENV"; exit 1; }
+    python3 -m venv "$VENV" || { echo "Error: no se pudo crear el venv (en Debian/Ubuntu: doas apt install python3-venv)." >&2; rm -rf "$VENV"; exit 1; }
 fi
 if ! "$VENV/bin/python" -c "import faster_whisper, numpy, rich" 2>/dev/null; then
     echo "Instalando dependencias (solo la primera vez)..."
