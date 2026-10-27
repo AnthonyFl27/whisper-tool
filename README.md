@@ -5,7 +5,7 @@ Herramienta de terminal que **graba el audio que suena en tu equipo** (bocinas o
 Sirve para transcribir audios que no se pueden descargar como archivo (por ejemplo, reproductores incrustados en
 páginas web). Todo corre en local: el audio no sale de tu equipo.
 
-![whisper-tool grabando: medidor de nivel, espectro y espectrograma en vivo](tool.png)
+![whisper-tool grabando: medidor de nivel, espectro con eje de frecuencias y espectrograma en vivo](tool.png)
 
 ## Requisitos
 
@@ -48,6 +48,10 @@ Los modelos se descargan de Hugging Face la primera vez que se usan y quedan en 
 | `Q` | salir sin grabar (en las pantallas iniciales) |
 
 Las grabaciones y transcripciones se guardan en `records/` como `grabacion_AAAAMMDD_HHMMSS.wav` y `.txt`.
+
+La interfaz se adapta al tamaño de la terminal: el espectro y el espectrograma ocupan el espacio disponible, se
+ajustan si redimensionas la ventana y se centran en pantallas anchas. Mientras grabas se ve el tiempo, el pico de
+nivel y el modelo en uso.
 
 ### Transcribir un archivo existente
 
