@@ -2,17 +2,19 @@
 """Graba el audio del sistema con un espectrograma en vivo y lo transcribe con faster-whisper.
 
 Uso: whisper-tool [modelo]      (sin modelo, muestra un menú: tiny, base, small, medium, large-v3)
-Iniciar la grabacion con Enter o Espacio; detenerla con Ctrl+C.
+Preparar la grabacion con Enter o Espacio: empieza sola al detectar sonido, se pausa tras unos segundos de
+silencio y sigue cuando vuelve el sonido. Detenerla con Ctrl+C.
 """
 import json
 import os
 import select
+import shutil
+import struct
 import subprocess
 import sys
 import termios
 import time
 import tty
-import wave
 from collections import deque
 from datetime import datetime
 from functools import lru_cache
@@ -24,8 +26,8 @@ from rich.align import Align
 from rich.color import Color
 from rich.console import Console, Group
 from rich.live import Live
-from rich.panel import Panel
-from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn
+from rich.progress import (BarColumn, DownloadColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn,
+                           TimeRemainingColumn, TransferSpeedColumn)
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
@@ -36,6 +38,11 @@ FFT_SIZE = 2048
 FREQ_LO, FREQ_HI = 80, 7500  # rango de frecuencias mostrado (escala logarítmica)
 BLOCKS = " ▁▂▃▄▅▆▇█"
 SILENCE_DB = -55.0  # por debajo de esto se considera sin senal
+LOW_DB = -35.0  # un pico por debajo de esto (pero sobre SILENCE_DB) es audio muy bajo: Whisper rinde peor
+AUTO_PAUSE = float(os.environ.get("WHISPER_TOOL_AUTO_PAUSE", 12))  # s de silencio tras los que la grabación se pausa sola
+PREROLL = 5  # bloques (0,5 s) que se conservan antes de que suene algo, para no cortar el inicio al empezar o reanudar
+PARAGRAPH_GAP = 1.5  # s de pausa entre frases que abren un párrafo nuevo en el texto
+PARAGRAPH_MAX = 400  # caracteres a partir de los cuales se abre un párrafo nuevo al terminar una frase
 DB_FLOOR, DB_CEIL = -80.0, -25.0
 HISTORY = 600  # lecturas guardadas para el espectrograma (60 s, de sobra para una terminal alta)
 MAX_WIDTH = 120  # ancho máximo del contenido; en terminales más anchas se centra
@@ -43,8 +50,9 @@ EMPTY = 0.06  # valores por debajo se dibujan como fondo, así el silencio no ll
 LEVELS = 48  # pasos de color (se cachean los estilos)
 
 ROOT = Path(__file__).resolve().parent.parent  # raiz del proyecto (src/ esta un nivel abajo)
-OUT_DIR = ROOT / "records"
-CONFIG_PATH = ROOT / ".whisper-tool.json"  # recuerda el último modelo usado
+DATA_DIR = Path(os.environ.get("WHISPER_TOOL_DIR", ROOT))  # donde viven records/ y la config; cambiarlo sirve para pruebas
+OUT_DIR = DATA_DIR / "records"
+CONFIG_PATH = DATA_DIR / ".whisper-tool.json"  # recuerda el último modelo usado
 FREQS = np.fft.rfftfreq(FFT_SIZE, 1 / RATE)
 console = Console()
 
@@ -212,18 +220,30 @@ def recording_screen(st, width, height):
     wf_lines = max(0, free - bar_rows)
 
     blink = int(time.monotonic() * 2) % 2 == 0
-    if st.paused:
-        status = Text("‖ EN PAUSA" if blink else "  EN PAUSA", style="bold cyan")
-    elif st.silent_for > 2.0:
-        status = Text("● SIN SEÑAL DE AUDIO", style="bold yellow")
+    if st.mode == "waiting":
+        status = Text("○ ESPERANDO SONIDO" if blink else "  ESPERANDO SONIDO", style="bold cyan")
+        keys = ("Espacio / P: empezar ya    Ctrl+C: salir", "Espacio: empezar    Ctrl+C: salir", "Ctrl+C: salir")
+    elif st.mode == "auto":
+        status = Text("‖ PAUSA POR SILENCIO" if blink else "  PAUSA POR SILENCIO", style="bold cyan")
+        keys = ("Sigue sola al volver el sonido    Espacio / P: seguir ya    Ctrl+C: terminar y transcribir",
+                "Espacio: seguir    Ctrl+C: terminar", "Ctrl+C: terminar")
     else:
-        status = Text("● GRABANDO" if blink else "○ GRABANDO", style="bold red")
+        if st.mode == "paused":
+            status = Text("‖ EN PAUSA" if blink else "  EN PAUSA", style="bold cyan")
+        elif st.silent_for > 2.0:
+            status = Text("● SIN SEÑAL DE AUDIO", style="bold yellow")
+        else:
+            status = Text("● GRABANDO" if blink else "○ GRABANDO", style="bold red")
+        keys = ("Espacio / P: pausar o continuar    Ctrl+C: terminar y transcribir",
+                "Espacio: pausa    Ctrl+C: terminar", "Ctrl+C: terminar")
     mins, secs = divmod(int(st.elapsed), 60)
     status.append(f"   {mins:02d}:{secs:02d}", style="bold white")
-    info = Text.assemble(("pico ", "grey50"), (f"{max(st.peak_db, -99.9):.1f} dB", "grey70"),
-                         ("  ·  modelo ", "grey50"), (st.model, "cyan"))
-    keys = pick(cw - 14, "Espacio / P: pausar o continuar    Ctrl+C: terminar y transcribir",
-                "Espacio: pausa    Ctrl+C: terminar", "Ctrl+C: terminar")
+    info = Text.assemble(("pico ", "grey50"), (f"{max(st.peak_db, -99.9):.1f} dB", "grey70"))
+    if SILENCE_DB < st.peak_db < LOW_DB and st.elapsed >= 5:
+        info.append("  ·  volumen bajo", style="bold yellow")
+    info.append("  ·  modelo ", style="grey50")
+    info.append(st.model, style="cyan")
+    keys = pick(cw - 14, *keys)
     span = Text(f"últimos {wf_lines * 2 * CHUNK / RATE:.0f} s" if wf_lines else "", style="grey50")
 
     indent = (width - cw) // 2  # el contenido se centra en la terminal
@@ -383,7 +403,9 @@ def wait_for_start(model_name):
         return screen(Group(
             Text("Listo para grabar", style="bold white"), Text(""),
             Text.assemble(("Modelo: ", "grey62"), (model_name, "bold cyan")), Text(""),
-            hints(["Enter / Espacio: iniciar grabación", "M: cambiar modelo", "Q / Ctrl+C: salir"], width - 4),
+            Text(f"Empieza a grabar sola cuando suene algo y se pausa tras {AUTO_PAUSE:.0f} s de silencio",
+                 style="grey62"), Text(""),
+            hints(["Enter / Espacio: preparar grabación", "M: cambiar modelo", "Q / Ctrl+C: salir"], width - 4),
         ))
 
     try:
@@ -413,11 +435,45 @@ class State:
         self.current = np.zeros(len(FREQS), np.float32)  # espectro de las barras (con caída suave)
         self.history = deque(maxlen=HISTORY)
         self.silent_for = 0.0
-        self.paused = False
+        # waiting: espera sonido para empezar; recording; paused: pausa manual; auto: pausada por silencio
+        self.mode = "recording"
+
+
+class WavWriter:
+    """Escribe el .wav mientras se graba y corrige la cabecera cada segundo: si el programa muere a mitad de una
+    grabación, el archivo queda con todo el audio escrito hasta el último segundo y se puede abrir."""
+
+    def __init__(self, path):
+        self.file = open(path, "wb")
+        self.size = 0  # bytes de audio escritos
+        self.synced = 0
+        self.sync()
+
+    def sync(self):
+        header = (b"RIFF" + struct.pack("<I", 36 + self.size) + b"WAVEfmt " +
+                  struct.pack("<IHHIIHH", 16, 1, 1, RATE, RATE * 2, 2, 16) + b"data" + struct.pack("<I", self.size))
+        self.file.seek(0)
+        self.file.write(header)
+        self.file.seek(0, os.SEEK_END)
+        self.file.flush()
+        self.synced = self.size
+
+    def write(self, data):
+        self.file.write(data)
+        self.size += len(data)
+        if self.size - self.synced >= RATE * 2:
+            self.sync()
+
+    def close(self):
+        self.sync()
+        self.file.close()
 
 
 def record(wav_path, model_name):
+    """Graba hasta Ctrl+C. Con teclado, espera a que suene algo para empezar; la grabación se pausa sola tras
+    AUTO_PAUSE s de silencio y sigue cuando vuelve el sonido. Devuelve (segundos grabados, pico en dB)."""
     st = State(model_name)
+    wav = WavWriter(wav_path)
     proc = subprocess.Popen(
         ["pw-record", "--raw", "-P", "stream.capture.sink=true", "--rate", str(RATE), "--channels", "1",
          "--format", "s16", "-"],
@@ -426,8 +482,9 @@ def record(wav_path, model_name):
     fd = proc.stdout.fileno()
     use_keys = sys.stdin.isatty()
     old_term = termios.tcgetattr(sys.stdin) if use_keys else None
-    frames = bytearray()
+    st.mode = "waiting" if use_keys else "recording"  # sin teclado no hay cómo empezar a mano: graba de inmediato
     pending = bytearray()  # audio aún no analizado (se analiza en bloques de CHUNK: 100 ms por fila)
+    preroll = deque(maxlen=PREROLL)  # últimos bloques sin grabar
     carry = b""
     last_sound = last_draw = time.monotonic()
     draw_every = 0.05  # hasta 20 cuadros por segundo; menos si la terminal es tan grande que dibujar tarda
@@ -442,34 +499,52 @@ def record(wav_path, model_name):
                 if use_keys and sys.stdin in ready:
                     key = os.read(sys.stdin.fileno(), 32).decode(errors="ignore")
                     if any(k in key for k in (" ", "p", "P")):
-                        st.paused = not st.paused
-                        if st.paused:
+                        if st.mode == "recording":
+                            st.mode = "paused"
                             st.current[:] = 0
                             st.level_db = -120.0
+                            pending.clear()
+                        else:  # pausa manual o por silencio, o esperando sonido: empieza o sigue ya
+                            st.mode = "recording"
+                            last_sound = time.monotonic()
+                            preroll.clear()
                         last_draw = 0.0  # redibuja ya
                 if fd in ready:
                     data = os.read(fd, CHUNK * 2)
                     if not data:
                         break
-                    if not st.paused:  # en pausa el audio se lee y se descarta
-                        data = carry + data
-                        carry = data[len(data) // 2 * 2:]
-                        data = data[: len(data) // 2 * 2]
-                        frames += data
+                    data = carry + data  # se mantiene la alineación de 16 bit aunque el audio se descarte
+                    carry = data[len(data) // 2 * 2:]
+                    data = data[: len(data) // 2 * 2]
+                    if st.mode != "paused":  # en pausa manual el audio se lee y se descarta
                         pending += data
                         while len(pending) >= CHUNK * 2:
-                            st.level_db, mag = analyze(np.frombuffer(bytes(pending[:CHUNK * 2]), dtype=np.int16))
+                            block = bytes(pending[:CHUNK * 2])
                             del pending[:CHUNK * 2]
-                            if st.level_db > SILENCE_DB:
+                            st.level_db, mag = analyze(np.frombuffer(block, dtype=np.int16))
+                            sound = st.level_db > SILENCE_DB
+                            if sound:
                                 last_sound = time.monotonic()
+                            if st.mode == "recording":
+                                wav.write(block)
+                            elif sound:  # waiting/auto: suena algo, se empieza o se sigue (con el medio segundo previo)
+                                st.mode = "recording"
+                                for old in preroll:
+                                    wav.write(old)
+                                preroll.clear()
+                                wav.write(block)
+                            else:
+                                preroll.append(block)
                             st.peak_db = max(st.peak_db, st.level_db)
                             st.history.appendleft(mag)
                             st.current = np.maximum(mag, st.current * 0.6)
                 now = time.monotonic()
-                if st.paused:
+                if st.mode == "paused":
                     last_sound = now
-                st.elapsed = len(frames) / 2 / RATE
+                st.elapsed = wav.size / 2 / RATE
                 st.silent_for = now - last_sound
+                if st.mode == "recording" and st.silent_for >= AUTO_PAUSE:
+                    st.mode = "auto"
                 if now - last_draw >= draw_every:
                     live.refresh()
                     last_draw = time.monotonic()
@@ -481,21 +556,107 @@ def record(wav_path, model_name):
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_term)
         proc.terminate()
         proc.wait()
-    with wave.open(str(wav_path), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(RATE)
-        w.writeframes(bytes(frames))
-    return len(frames) / 2 / RATE, st.peak_db
+        if st.mode == "recording" and pending:
+            wav.write(bytes(pending))  # el último bloque, que aún no llegaba a los 100 ms
+        wav.close()
+    return wav.size / 2 / RATE, st.peak_db
+
+
+def clock(t):
+    """Segundos -> MM:SS."""
+    m, s = divmod(int(t), 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def to_paragraphs(segments):
+    """Segmentos (inicio, fin, texto) -> texto en párrafos separados por una línea en blanco. Se abre un párrafo
+    nuevo tras una pausa de PARAGRAPH_GAP s, o al terminar una frase cuando el párrafo ya es largo."""
+    paragraphs, current, last_end = [], [], 0.0
+    for start, end, text in segments:
+        if current and (start - last_end >= PARAGRAPH_GAP
+                        or (len(" ".join(current)) >= PARAGRAPH_MAX and current[-1].endswith((".", "?", "!")))):
+            paragraphs.append(" ".join(current))
+            current = []
+        current.append(text)
+        last_end = end
+    if current:
+        paragraphs.append(" ".join(current))
+    return "\n\n".join(paragraphs)
 
 
 def transcribe(wav_path, model_name):
+    """Transcribe mostrando una barra de progreso y cada segmento con su tiempo. Devuelve [(inicio, fin, texto)]."""
     from faster_whisper import WhisperModel
 
-    with console.status("[bold cyan]Cargando modelo y transcribiendo…[/bold cyan]", spinner="dots"):
+    with console.status("[bold cyan]Cargando modelo…[/bold cyan]", spinner="dots"):
         model = WhisperModel(model_name, device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(str(wav_path), language="en")
-        return " ".join(s.text.strip() for s in segments)
+        # vad_filter descarta los silencios antes de transcribir: evita el texto inventado en las pausas.
+        # word_timestamps ajusta cada segmento a sus palabras; sin eso Whisper los estira sobre los silencios
+        # y no se podrían medir las pausas entre frases para separar párrafos
+        segments, info = model.transcribe(str(wav_path), language="en", vad_filter=True, word_timestamps=True)
+    progress = Progress(TextColumn("[bold cyan]Transcribiendo"), BarColumn(), TaskProgressColumn(),
+                        TimeElapsedColumn(), console=console)
+    result = []
+    with progress:
+        task = progress.add_task("", total=info.duration or None)
+        for s in segments:  # el trabajo real ocurre aquí: el generador transcribe a medida que se recorre
+            text = s.text.strip()
+            if text:
+                result.append((s.start, s.end, text))
+                progress.console.print(Text.assemble((f"{clock(s.start)}  ", "grey50"), text))
+            progress.update(task, completed=min(s.end, info.duration))
+        progress.update(task, completed=info.duration)
+    return result
+
+
+def ask_retry():
+    """True si el usuario pide reintentar (R o Enter); False con Q o Ctrl+C. Sin teclado no pregunta."""
+    if not sys.stdin.isatty():
+        return False
+    console.print("[bold]R[/bold] / Enter: reintentar    [bold]Q[/bold] / Ctrl+C: salir")
+    old_term = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        while True:
+            key = os.read(sys.stdin.fileno(), 32).decode(errors="ignore").lower()
+            if key in ("r", "\n", "\r"):
+                return True
+            if key == "q":
+                return False
+    except KeyboardInterrupt:
+        return False
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_term)
+
+
+def transcribe_with_retry(wav_path, model_name):
+    """Devuelve (segmentos, segundos que tardó), o (None, 0) si falló o se canceló y no se reintentó.
+    El .wav ya está guardado, así que un fallo no pierde la grabación."""
+    while True:
+        start = time.monotonic()
+        try:
+            return transcribe(wav_path, model_name), time.monotonic() - start
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Transcripción cancelada.[/yellow]")
+        except Exception as e:
+            console.print(f"\n[red]La transcripción falló:[/red] {e}")
+        console.print(f"[grey62]El audio sigue guardado en {wav_path}[/grey62]")
+        if not ask_retry():
+            return None, 0
+
+
+def copy_to_clipboard(text):
+    """Copia el texto con wl-copy (Wayland) o xsel (X11). None si está desactivado; True/False según resultado."""
+    if os.environ.get("WHISPER_TOOL_NO_CLIPBOARD"):
+        return None
+    for cmd in (["wl-copy"], ["xsel", "--clipboard", "--input"]):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text.encode(), check=True, timeout=5, stderr=subprocess.DEVNULL)
+                return True
+            except (OSError, subprocess.SubprocessError):
+                continue
+    return False
 
 
 def main():
@@ -526,21 +687,40 @@ def main():
         if action == "quit":
             return
         change = True
-    OUT_DIR.mkdir(exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     wav_path = OUT_DIR / f"grabacion_{stamp}.wav"
 
     duration, peak_db = record(wav_path, model_name)
+    if duration == 0:  # se salió antes de que sonara algo
+        wav_path.unlink(missing_ok=True)
+        console.print("\n[yellow]No se grabó nada.[/yellow]")
+        return
     console.print(f"\n[green]Grabación guardada:[/green] {wav_path}  ({duration:.0f} s)")
     if peak_db < SILENCE_DB:
         console.print("[yellow]Aviso:[/yellow] no se detectó audio. Revisa el volumen y que el sonido salga por el "
                       "dispositivo de salida predeterminado.")
-    text = transcribe(wav_path, model_name)
+    elif peak_db < LOW_DB:
+        console.print(f"[yellow]Aviso:[/yellow] el volumen fue muy bajo (pico {peak_db:.0f} dB). Sube el volumen del "
+                      "sistema o del reproductor: la transcripción puede salir peor.")
+    segments, took = transcribe_with_retry(wav_path, model_name)
+    if segments is None:
+        console.print(f"[grey62]Para transcribirlo más tarde: ./.venv-whisper/bin/python src/transcribe.py "
+                      f"{wav_path} {model_name}[/grey62]")
+        return
+    text = to_paragraphs(segments)
     txt_path = wav_path.with_suffix(".txt")
     txt_path.write_text(text + "\n", encoding="utf-8")
-    console.print(Panel(text or "(sin texto reconocido)", title="Transcripción", border_style="green",
-                        padding=(1, 2)))
-    console.print(f"[grey62]Texto guardado en {txt_path}[/grey62]")
+    console.print(f"\n[green]Transcrito en {took:.0f} s[/green] (audio de {duration:.0f} s)")
+    if segments:
+        console.print(f"[grey62]Texto guardado en {txt_path}[/grey62]")
+    else:
+        console.print(f"[yellow](sin texto reconocido)[/yellow]  [grey62]{txt_path}[/grey62]")
+    copied = copy_to_clipboard(text) if text else None
+    if copied:
+        console.print("[green]Texto copiado al portapapeles[/green]")
+    elif copied is False:
+        console.print("[yellow]No se pudo copiar al portapapeles[/yellow] (instala wl-clipboard o xsel)")
 
 
 if __name__ == "__main__":
